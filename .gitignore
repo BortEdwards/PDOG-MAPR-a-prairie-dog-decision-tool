@@ -1,3 +1,9 @@
+# Large data files
+*.rds
+climate_complete_matrix_utm13.rds
+growth_model.rds
+plague_model.rds
+
 # History files
 .Rhistory
 .Rapp.history
@@ -47,3 +53,4 @@ po/*~
 
 # RStudio Connect folder
 rsconnect/
+
