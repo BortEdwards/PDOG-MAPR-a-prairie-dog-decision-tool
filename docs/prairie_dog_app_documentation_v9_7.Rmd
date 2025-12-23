@@ -1,0 +1,838 @@
+Prairie Dog Decision Tool v9.7
+PDOG MAPR - Prairie Dog Management and Planning Resource
+Research Team: Lead - Dr Ana Davidson (CNHP); Model Development & validation - Dr Gabrielle Barrile (UW); Initial app development - Max Sergeyev (CSU); App rebuild & model validation - Dr Bort Edwards (CNHP)
+2025-12-15
+
+Overview:
+
+Purpose
+PDOG MAPR is a decision support tool to help inform management of prairie dog ecosystems. This tool is intended to be the first step in an iterative process informed by conservation partners and managers that results in increasingly sophisticated decision support for prairie dog management.
+
+Key Features
+glmmTMB models with random effects (Site)
+Multi-year iteration capability with NEW TAB opening
+Economic calculator with 4 scenarios
+Summary plots and statistics
+Interactive map interface with polygon drawing capability
+Plague prediction and colony growth forecasting
+Application Architecture
+The application consists of:
+
+UI (User Interface): Built with Shiny/Bootstrap
+Server Logic: Handles data processing and model execution
+Helper Functions: Climate extraction, raster operations, uncertainty calculations
+Data Requirements: Climate matrix, growth model, plague model
+Required Libraries
+library(shiny)           # Web application framework
+library(shinythemes)     # UI themes
+library(shinyBS)         # Bootstrap components
+library(shinyjs)         # JavaScript operations
+library(later)           # Deferred execution
+library(sp)              # Spatial data classes
+library(raster)          # Raster data operations
+library(landscapemetrics)# Landscape metrics calculation
+library(leaflet)         # Interactive maps
+library(leaflet.extras)  # Additional leaflet features
+library(viridis)         # Color palettes
+library(sf)              # Simple features spatial data
+library(zip)             # File compression
+library(mapview)         # Interactive spatial data viewing
+library(terra)           # Spatial data analysis
+library(plotrix)         # Specialized plots
+library(lwgeom)          # Lightweight geometry operations
+library(FNN)             # Fast nearest neighbor search
+library(glmmTMB)         # Generalized linear mixed models
+library(lme4)            # Linear mixed-effects models
+library(tidyverse)       # Data manipulation and visualization
+library(digest)          # Cryptographic hash functions
+Data Loading and Validation
+Required Files
+The application requires three essential data files:
+
+climate_complete_matrix_utm13.rds - Climate data matrix
+growth_model.rds - Colony growth prediction model
+plague_model.rds - Plague outbreak prediction model
+# Check for required files
+required_files <- c("climate_complete_matrix_utm13.rds", 
+                    "growth_model.rds", 
+                    "plague_model.rds")
+missing_files <- required_files[!file.exists(required_files)]
+
+if(length(missing_files) > 0) {
+  cat("ERROR: Missing required files:\n")
+  for(file in missing_files) {
+    cat("  -", file, "\n")
+  }
+  cat("\nPlease ensure these files are in your working directory:\n")
+  cat("Current working directory:", getwd(), "\n")
+  stop("Cannot proceed without required files")
+} else {
+  cat("All required files found!\n")
+}
+
+# Load climate matrix
+cat("Loading climate matrix...\n")
+climate_matrix <- readRDS("climate_complete_matrix_utm13.rds")
+cat("Climate matrix loaded:", nrow(climate_matrix), "rows,", 
+    ncol(climate_matrix), "columns\n")
+
+# Load glmmTMB models
+cat("Loading glmmTMB models...\n")
+growth_model <- readRDS("growth_model.rds")
+plague_model <- readRDS("plague_model.rds")
+cat("glmmTMB models loaded successfully!\n")
+Configuration Parameters
+# Insecticide persistence configuration
+# Current setting: 1 year (no carryover between iterations)
+# Future: Can be changed to 2, 3, etc. for multi-year persistence
+INSECTICIDE_PERSISTENCE_YEARS <- 1
+Helper Functions
+Climate Data Extraction
+Extract Climate from Matrix
+Extracts climate data using nearest neighbor matching.
+
+extract_climate_from_matrix <- function(coords_utm, climate_matrix) {
+  # Get valid climate coordinates
+  climate_coords <- as.matrix(climate_matrix[, c("x", "y")])
+  valid_climate <- complete.cases(climate_coords)
+  climate_coords <- climate_coords[valid_climate, ]
+  climate_matrix_clean <- climate_matrix[valid_climate, ]
+  
+  # Find nearest neighbors
+  nn_indices <- get.knnx(climate_coords, coords_utm, k = 1)$nn.index
+  
+  # Extract data
+  extracted_data <- as.data.frame(climate_matrix_clean[nn_indices, ])
+  names(extracted_data) <- names(climate_matrix_clean)
+  
+  return(extracted_data)
+}
+Extract Climate Data for Polygons
+Extracts climate data for polygon centroids with optional buffering.
+
+extract_climate_data <- function(shapefile_sf, climate_matrix, buffer_distance = 100) {
+  # Validate inputs
+  if(is.null(shapefile_sf) || nrow(shapefile_sf) == 0) {
+    stop("Shapefile is empty or NULL")
+  }
+  
+  if(is.null(climate_matrix) || nrow(climate_matrix) == 0) {
+    stop("Climate matrix is empty or NULL")
+  }
+  
+  # Transform to UTM Zone 13
+  target_crs <- "+proj=utm +zone=13 +datum=NAD83 +units=m +no_defs"
+  if(is.na(st_crs(shapefile_sf)) || st_crs(shapefile_sf)$input != target_crs) {
+    shapefile_utm <- st_transform(shapefile_sf, crs = target_crs)
+  } else {
+    shapefile_utm <- shapefile_sf
+  }
+  
+  # Get centroids
+  centroids <- st_centroid(shapefile_utm)
+  centroid_coords <- st_coordinates(centroids)
+  
+  # Extract climate data using nearest neighbor
+  climate_coords <- as.matrix(climate_matrix[, c("x", "y")])
+  valid_climate <- complete.cases(climate_coords)
+  climate_coords <- climate_coords[valid_climate, ]
+  climate_matrix_clean <- climate_matrix[valid_climate, ]
+  
+  nn_indices <- get.knnx(climate_coords, centroid_coords, k = 1)$nn.index
+  extracted_data <- climate_matrix_clean[nn_indices, ]
+  extracted_data$poly_id <- seq_len(nrow(centroid_coords))
+  
+  return(extracted_data)
+}
+Raster Operations
+Create Raster Template
+Creates a raster template from spatial extent.
+
+create_raster_template <- function(extent_sf, resolution = 100, buffer = 10000) {
+  # Transform to UTM
+  extent_utm <- st_transform(extent_sf, 
+                             crs = "+proj=utm +zone=13 +datum=NAD83 +units=m +no_defs")
+  extent_bbox <- st_bbox(extent_utm)
+  
+  # Create raster
+  r <- raster()
+  extent(r) <- c(extent_bbox[1] - buffer, extent_bbox[3] + buffer, 
+                 extent_bbox[2] - buffer, extent_bbox[4] + buffer)
+  res(r) <- c(resolution, resolution)
+  crs(r) <- "+proj=utm +zone=13 +datum=NAD83 +units=m +no_defs"
+  
+  return(r)
+}
+Calculate Colony Size
+Calculates colony sizes using clump analysis.
+
+calculate_colony_size <- function(colony_raster) {
+  # Identify patches
+  temp_patch <- clump(colony_raster, directions = 8, gaps = FALSE)
+  
+  # Calculate patch sizes
+  cells_patch <- freq(temp_patch)
+  cells_patch <- as.data.frame(cells_patch[1:(nrow(cells_patch)-1), ])
+  
+  # Substitute patch IDs with sizes
+  temp_psize <- subs(temp_patch, cells_patch, by = 1, which = 2)
+  temp_psize[is.na(temp_psize)] <- 0
+  
+  return(temp_psize)
+}
+Plague Detection
+Detect Plague Events
+Detects plague outbreaks based on colony decline between years.
+
+detect_plague_events <- function(colony_raster_t_minus_1, colony_raster_t) {
+  # Convert to terra format
+  raster1 <- rast(colony_raster_t_minus_1)
+  raster2 <- rast(colony_raster_t)
+  
+  # Identify clusters
+  clumps1 <- patches(raster1, directions = 8, zeroAsNA = TRUE)
+  cluster_sizes1 <- as.data.frame(freq(clumps1))
+  names(cluster_sizes1) <- c("layer", "cluster_id", "size1")
+  cluster_sizes1$size2 <- 0
+  
+  # Calculate remaining pixels in each cluster
+  for (j in cluster_sizes1$cluster_id) {
+    cluster_mask <- clumps1 == j
+    remaining_pixels <- sum(raster2[cluster_mask] == 1, na.rm = TRUE)
+    cluster_sizes1$size2[cluster_sizes1$cluster_id == j] <- remaining_pixels
+  }
+  
+  # Calculate decline and plague status
+  cluster_sizes1$decline <- (cluster_sizes1$size1 - cluster_sizes1$size2) / 
+                            cluster_sizes1$size1
+  cluster_sizes1$plague <- ifelse(cluster_sizes1$decline >= 0.5, -1, 3)
+  
+  # Create reclassification matrix
+  reclass_matrix <- as.matrix(data.frame(
+    cluster_id = cluster_sizes1$cluster_id,
+    plague_status = cluster_sizes1$plague
+  ))
+  
+  # Reclassify raster
+  plague_raster <- classify(clumps1, rcl = reclass_matrix, right = FALSE)
+  plague_raster <- raster(plague_raster)
+  
+  return(plague_raster)
+}
+Calculate Distance to Plague
+Calculates distance to nearest plague-affected area.
+
+calculate_distance_to_plague <- function(colony_raster_current, colony_raster_previous) {
+  # Detect plague events
+  plague_raster <- detect_plague_events(colony_raster_previous, colony_raster_current)
+  
+  # Calculate change
+  chng <- colony_raster_current - colony_raster_previous
+  values(chng) <- ifelse(values(chng) > 0, 2, 
+                         ifelse(values(chng) < 0, -1, 0))
+  
+  # Calculate maintenance
+  maint <- colony_raster_current * colony_raster_previous
+  status <- chng + maint
+  
+  # Overlay with plague status
+  status_new <- overlay(status, plague_raster, fun = function(x, y) {
+    ifelse(x == -1 & y != -1, 3, x)
+  })
+  
+  # Calculate distance to plague
+  distnoplg <- status_new
+  values(distnoplg) <- 50000
+  y_r <- status_new
+  values(y_r) <- ifelse(values(y_r) < 0, 1, NA)
+  
+  if(any(!is.na(values(y_r)))) {
+    y_r2 <- distance(y_r == 1)
+  } else {
+    y_r2 <- distnoplg
+  }
+  
+  return(y_r2)
+}
+Uncertainty Calculation
+Delta Method for Uncertainty
+Calculates prediction uncertainty using the Delta Method.
+
+calculate_uncertainty_delta <- function(model, pred_data, predictions_link) {
+  tryCatch({
+    # Get variance-covariance matrix
+    vcov_mat <- vcov(model)$cond
+    
+    # Get fixed effects design matrix
+    fixed_formula <- lme4::nobars(formula(model))
+    X <- model.matrix(fixed_formula[-2], data = pred_data)
+    
+    # Calculate variance and standard error on link scale
+    var_link <- diag(X %*% vcov_mat %*% t(X))
+    se_link <- sqrt(var_link)
+    
+    # Transform to probability scale using Delta Method
+    pred_prob <- plogis(predictions_link)
+    se_prob <- se_link * pred_prob * (1 - pred_prob)
+    
+    # Calculate confidence intervals
+    ci_lower <- plogis(predictions_link - 1.96 * se_link)
+    ci_upper <- plogis(predictions_link + 1.96 * se_link)
+    
+    return(list(
+      se = se_prob,
+      ci_lower = ci_lower,
+      ci_upper = ci_upper
+    ))
+  }, error = function(e) {
+    # Fallback to simple uncertainty estimate
+    pred_prob <- plogis(predictions_link)
+    se_prob <- pred_prob * 0.15
+    list(
+      se = se_prob,
+      ci_lower = pmax(0, pred_prob - 1.96 * se_prob),
+      ci_upper = pmin(1, pred_prob + 1.96 * se_prob)
+    )
+  })
+}
+Economic Calculator
+Calculate Economic Scenarios
+Calculates economic impacts under different forage assumptions.
+
+Four Scenarios:
+
+Scenario A: Based on average prairie dog consumption values
+Scenario B: Prairie dog colonies have no influence on forage (100% forage value)
+Scenario C: Prairie dog colonies yield 50% forage
+Scenario D: Prairie dog colonies yield 0% forage
+calculate_economic_scenario <- function(acres_poisoned, acres_pdogs_after, 
+                                       ppa_value, cost_per_acre, scenario_type) {
+  # Fixed parameters (under the hood)
+  PDOG_DENSITY_PER_HA <- 42
+  EFFICACY_POISONING <- 100  # percent
+  COWS_PER_PDOG <- 1/335     # prairie dogs per cow equivalent
+  POUNDS_PER_COW_PER_DAY <- 0.025 * 1000  # 25 lbs
+  DAYS_PER_YEAR <- 365
+  
+  # Calculate based on scenario type
+  if (scenario_type == "consumption") {
+    # Scenario A: Based on pdog consumption estimates
+    
+    # Forage SAVED (from poisoning)
+    total_pdogs_poisoned <- PDOG_DENSITY_PER_HA * acres_poisoned
+    cows_equivalent_saved <- total_pdogs_poisoned * COWS_PER_PDOG
+    pounds_per_cow_per_year <- POUNDS_PER_COW_PER_DAY * DAYS_PER_YEAR
+    forage_saved <- pounds_per_cow_per_year * cows_equivalent_saved
+    
+    # Forage LOST (from remaining pdogs)
+    total_pdogs_remaining <- PDOG_DENSITY_PER_HA * acres_pdogs_after
+    cows_equivalent_lost <- total_pdogs_remaining * COWS_PER_PDOG
+    forage_lost <- pounds_per_cow_per_year * cows_equivalent_lost
+    
+  } else if (scenario_type == "no_forage") {
+    # Scenario B: Pdog colonies have 0% forage value
+    forage_saved <- acres_poisoned * ppa_value
+    forage_lost <- acres_pdogs_after * ppa_value
+    
+  } else if (scenario_type == "half_forage") {
+    # Scenario C: Pdog colonies have 50% forage value
+    forage_saved <- acres_poisoned * ppa_value * 0.5
+    forage_lost <- acres_pdogs_after * ppa_value * 0.5
+    
+  } else if (scenario_type == "no_increase") {
+    # Scenario D: No increase in forage
+    forage_saved <- 0
+    forage_lost <- 0
+  }
+  
+  # Calculate total cost
+  total_cost <- cost_per_acre * acres_poisoned
+  
+  return(list(
+    forage_saved = forage_saved,
+    forage_lost = forage_lost,
+    total_cost = total_cost
+  ))
+}
+User Interface
+The UI is built using navbarPage with two main tabs:
+
+Overview Tab: Documentation and instructions
+Predict Tab: Interactive prediction interface
+UI Structure
+ui <- navbarPage("Prairie Dog Modeling Application", 
+                 selected = "Predict", 
+                 collapsible = TRUE, 
+                 inverse = TRUE, 
+                 theme = shinytheme("sandstone"),
+                 
+                 useShinyjs(),
+                 
+                 # Custom CSS for styling
+                 tags$head(
+                   tags$style(HTML("
+                     # [CSS styling code - see full application for details]
+                   "))
+                 ),
+                 
+                 # Overview Tab
+                 tabPanel("Overview", ...),
+                 
+                 # Predict Tab
+                 tabPanel("Predict", ...)
+)
+Key UI Components
+Sidebar Panel
+The sidebar contains:
+
+Data source indicator (for multi-year iterations)
+Step 0: Optional year selector
+Step 1: Current year colony upload
+Step 2: Prairie dog control areas upload
+Step 3: Plague treatment areas upload
+Step 3b: Draw management areas
+Step 4: Prior year colony upload
+Step 5: Study region selection
+Climate parameters (temperature, precipitation)
+Prediction thresholds (growth and plague)
+Run Models button
+Download button
+Main Panel
+The main panel displays:
+
+Year indicator and carry forward button
+Your Inputs map (current year data)
+Predicted Colonies map (next year forecast)
+Predicted Plague Probability map
+Summary Statistics table
+Economic Analysis (4 scenarios)
+Plague Analysis plots (colony count and area distributions)
+Economic Scenario Descriptions table
+Additional Information (resources and references)
+Server Logic
+Reactive Values
+The server maintains several reactive values:
+
+values <- reactiveValues(
+  current_colonies = NULL,
+  poison_areas = NULL,
+  insecticide_areas = NULL,
+  processed_colonies = NULL,
+  predicted_colonies = NULL,
+  predicted_plague = NULL,
+  models_completed = FALSE,
+  last_results = NULL,
+  button_clicked = FALSE,
+  models_running = FALSE,
+  drawn_poison_polygons = list(),
+  drawn_insecticide_polygons = list(),
+  poison_counter = 0,
+  insecticide_counter = 0,
+  poison_upload_year = NULL,
+  insecticide_upload_year = NULL,
+  economic_results = list(
+    A = list(forage_lost = 0, total_cost = 0),
+    B = list(forage_lost = 0, total_cost = 0),
+    C = list(forage_lost = 0, total_cost = 0),
+    D = list(forage_lost = 0, total_cost = 0)
+  ),
+  # Multi-year iteration state
+  current_year = 1,
+  base_year = NULL,
+  carried_colonies_current = NULL,
+  carried_colonies_prior = NULL
+)
+Multi-Year Iteration
+The application supports multi-year iterations by:
+
+Saving predicted colonies to temporary files
+Opening a new browser tab with URL parameters
+Loading carried-over data in the new session
+Automatically populating file uploads from previous predictions
+URL Parameters
+When carrying forward to a new year:
+
+carryover_id: Unique session identifier
+year_num: Current iteration year number
+base_year: Optional base year for absolute year display
+Data Loading
+Current Colonies
+current_colonies <- reactive({
+  # If carried over, use that data
+  if (!is.null(values$carried_colonies_current)) {
+    col <- values$carried_colonies_current
+    values$current_colonies <- col
+    return(col)
+  }
+  
+  # Otherwise require file upload
+  req(input$colonies)
+  
+  # [File loading and transformation code]
+  # Returns transformed colonies in WGS84
+})
+Management Areas
+Similar reactive functions handle:
+
+poison_areas(): Prairie dog control areas
+insecticide_areas(): Plague treatment areas
+Both support:
+
+File uploads
+Drawn polygons via leaflet
+Combination of uploaded and drawn areas
+Model Execution
+Colony Growth Predictions
+The run_colony_predictions() function:
+
+Loads or uses carried-over prior year data
+Creates raster templates
+Calculates landscape metrics (mean nearest neighbor, cohesion, contagion)
+Extracts climate data
+Runs glmmTMB growth model
+Applies growth threshold
+Handles plague persistence with insecticide treatment
+Applies plague threshold
+Combines growth and persistence
+Converts raster to polygons
+Calculates uncertainty using Delta Method
+Plague Probability Predictions
+The run_plague_predictions() function:
+
+Follows similar preprocessing steps
+Calculates distance to plague
+Runs glmmTMB plague model
+Extracts mean plague probability per colony
+Assigns color codes based on risk level
+Model Run Trigger
+observeEvent(input$runModels, {
+  # Validation checks
+  # Set running state
+  # Process colonies
+  # Run predictions
+  # Calculate summary statistics
+  # Update UI elements
+  # Auto-populate economic inputs
+  # Trigger map updates
+})
+Maps
+Interactive Leaflet Maps
+The application uses three main maps:
+
+Main Overlay Map (main_overlay_map):
+Shows current colonies
+Displays uploaded management areas
+Allows polygon drawing
+Updates when files are uploaded
+Prediction Results Map (prediction_results):
+Shows predicted colonies for next year
+Includes growth probability popups
+Displays 95% confidence intervals
+Plague Prediction Map (plgpred):
+Color-coded by plague probability
+Green (low risk) to dark red (high risk)
+Shows percentage risk in popups
+Polygon Drawing
+Users can draw management areas directly on the map:
+
+observeEvent(input$main_overlay_map_draw_new_feature, {
+  feature <- input$main_overlay_map_draw_new_feature
+  current_mode <- input$drawMode
+  
+  sf_poly <- convert_drawn_to_sf(feature)
+  
+  if (!is.null(sf_poly)) {
+    if (current_mode == "poison") {
+      # Add to poison polygons
+    } else if (current_mode == "insecticide") {
+      # Add to insecticide polygons
+    }
+  }
+})
+Visualizations
+Plague Distribution Plots
+Two side-by-side plots show:
+
+Colony Count by Probability: Bar chart of number of colonies in each 10% risk bin
+Area by Probability: Bar chart of total acreage in each risk bin
+Both use color gradients from green (low risk) to red (high risk).
+
+Summary Statistics Table
+Displays:
+
+Current colony count
+Predicted colony count for next year
+Area change in acres
+Maximum plague probability
+Mean plague probability
+Economic Analysis
+Four-Scenario Calculator
+The economic calculator provides four parallel scenarios:
+
+Scenario A: Average Prairie Dog Consumption Values - Uses empirical consumption data - 42 prairie dogs per acre density - 335:1 prairie dogs per cow ratio - 25 lbs forage per cow per day
+
+Scenario B: No Influence on Forage - Assumes prairie dog areas provide 100% forage value - No change in forage from prairie dog presence
+
+Scenario C: 50% Forage Value - Prairie dog colonies yield 50% of normal forage - User inputs baseline production per acre (PPA)
+
+Scenario D: 0% Forage Value - Prairie dog colonies are considered barren - User inputs baseline production per acre (PPA)
+
+Auto-Population
+When models complete, the calculator automatically populates:
+
+Acres of prairie dog control (from uploaded/drawn areas)
+Acres of prairie dogs after prediction (from model results)
+Outputs
+Each scenario displays:
+
+Change in forage (lbs): Net change accounting for saved and lost forage
+Expenditure on Pdog control ($): Total cost of control measures
+Download Functionality
+Users can download predicted colonies as shapefiles:
+
+output$ShapeExport <- downloadHandler(
+  filename = function() { "predicted_colonies.zip" },
+  content = function(file) {
+    # Create temporary directory
+    # Write shapefile components
+    # Zip files
+    # Return zip file
+  }
+)
+Data Flow
+Typical Workflow
+Initial Setup
+User selects base year (optional)
+Uploads current year colony shapefile
+Management Input
+Uploads or draws prairie dog control areas
+Uploads or draws plague treatment areas
+Historical Data
+Uploads prior year colony shapefile
+Or uses default (same as current year)
+Configuration
+Selects study region
+Adjusts climate parameters
+Sets prediction thresholds
+Model Execution
+Clicks “Run Models”
+Server processes colonies
+Runs glmmTMB predictions
+Displays results
+Analysis
+Reviews predicted colonies on map
+Examines plague probability distribution
+Analyzes economic scenarios
+Iteration (Optional)
+Clicks “Carry Forward to Next Year”
+New tab opens with URL parameters
+Previous predictions become current year data
+Process repeats for Year t+2
+Data Transformations
+Coordinate Reference Systems
+The application handles multiple CRS:
+
+Input: WGS84 (EPSG:4326) from shapefiles
+Processing: UTM Zone 13 NAD83 for spatial operations
+Output: WGS84 for leaflet maps
+Raster Operations
+Key raster transformations:
+
+Rasterization: Convert polygons to 100m resolution raster
+Clumping: Identify contiguous patches
+Distance Calculation: Compute distance rasters
+Masking: Apply management area masks
+Threshold Application: Binary classification
+Polygonization: Convert back to vector format
+Model Details
+Growth Model (glmmTMB)
+Response Variable: Colony growth (binary: expanded or not)
+
+Key Predictors: - dfc: Distance from current colony edge - hotr: Heat load index - contagion: Landscape contagion metric - ws: Winter-spring precipitation - wy: Whole year precipitation
+
+Random Effect: Site (study location)
+
+Link Function: Logit
+
+Plague Model (glmmTMB)
+Response Variable: Plague occurrence (binary: present or not)
+
+Key Predictors: - mnn: Mean nearest neighbor distance - mnn_sq: MNN squared term - cohesion: Landscape cohesion metric - dp: Distance to plague - dp_sq: Distance to plague squared - psize: Patch/colony size - zwssf: Change in winter-spring to spring-fall precipitation - zztmax: Maximum summer temperature - zztmax_sq: Temperature squared term
+
+Random Effect: Site (study location)
+
+Link Function: Logit
+
+Threshold Application
+Growth Threshold (Default: 0.90)
+Predicted growth probability must exceed this value
+Higher values = more conservative growth predictions
+Pixels with prob > threshold become new colony area
+Plague Threshold (Default: 0.75)
+Predicted plague probability determines persistence
+Note: This is applied as 1 - threshold for survival
+Higher threshold = more permissive (more colonies persist)
+Pixels with prob < (1 - threshold) survive plague
+Important: The plague threshold of 0.75 is calibrated specifically for glmmTMB predictions. The actual persistence calculation uses 1 - input$thresholdp, so a threshold of 0.75 means colonies with plague probability < 0.25 will persist.
+
+Regional Calibration
+The model includes random effects for 9 study sites:
+
+Cimarron
+CMRfull
+ComancheNW
+ComancheSE
+Kiowa
+PawneeE
+PawneeW
+RitaBlanca
+ThunderBasin
+Users can select:
+
+Population Average: Uses fixed effects only
+Specific Site: Adds site-specific random effect
+Warning: Using a region that doesn’t match your study area may produce biologically implausible results.
+
+Climate Scenarios
+Users can vary climate inputs:
+
+Temperature (Prior Year Summer)
+Cold: Minimum historical value
+Average: Mean historical value
+Warm: Maximum historical value
+Precipitation (Current Year)
+Dry: Minimum historical value
+Average: Mean historical value
+Wet: Maximum historical value
+Precipitation (Next Year Spring)
+Dry: Minimum historical value
+Average: Mean historical value
+Wet: Maximum historical value
+Precipitation Change (Current to Next Year)
+Dry Fall Wet Spring: Specific pattern
+Average: Mean pattern
+Wet Fall Dry Spring: Specific pattern
+All climate data derived from 2000-2020 historical records.
+
+Technical Implementation Notes
+Session Management
+Temporary File Storage
+Multi-year iterations use temporary directory structure:
+
+/tmp/prairie_dog_carryover/
+  └── [carryover_id]/
+      ├── current_colonies.rds
+      └── prior_colonies.rds
+Files persist during session but are cleaned up when: - Session ends normally - Browser tab closes - Server restarts
+
+URL Parameter Passing
+New tabs receive parameters via query string:
+
+?carryover_id=carry_20231215_143022_abc123&year_num=2&base_year=2025
+Performance Considerations
+Raster Resolution
+Default 100m resolution balances: - Computational speed - Spatial accuracy - Memory usage
+
+Can be adjusted in create_raster_template() if needed.
+
+Climate Data Extraction
+Uses fast nearest neighbor search (FNN package) to: - Handle large climate matrices efficiently - Avoid interpolation complexity - Ensure consistent results
+
+Model Prediction
+glmmTMB predictions can be slow for large areas. The application: - Provides progress notifications - Disables “Run Models” button during execution - Updates button appearance to show status
+
+Error Handling
+Validation Checks
+The application validates: - File uploads (presence and format) - Shapefile completeness (all components present) - CRS compatibility - Climate data availability - Model convergence
+
+Fallback Strategies
+When errors occur: - Landscape metrics: Uses reasonable defaults - Uncertainty calculations: Falls back to simple estimation - Distance calculations: Uses large default values
+
+User Notifications
+Provides notifications for: - Missing files - Model execution start/completion - Errors during processing - Successful operations
+
+Known Limitations
+Model Applicability
+Geographic Scope: Calibrated for central US black-tailed prairie dogs
+Temporal Scope: Based on 2000-2020 data
+Resolution: 100m pixels may not capture fine-scale dynamics
+Epizootic Focus: Designed for large-scale plague outbreaks, not enzootic dynamics
+Management Assumptions
+100% Efficacy: Control measures assumed completely effective
+Annual Reset: Management effects don’t persist between years (configurable)
+Spatial Precision: Cannot predict exact recovery locations after plague
+Data Requirements
+Prior Year Data: Optional but recommended for best results
+Regional Match: Predictions most reliable within calibrated regions
+Climate Dependence: Requires complete climate data coverage
+Technical Constraints
+Browser Memory: Large areas may strain browser resources
+File Size: Very large shapefiles may upload slowly
+Session Duration: Temporary files expire when browser closes
+Potential Enhancements
+Features
+Variable Management Efficacy: Incorporate realistic success rates
+Multi-Year Persistence: Configurable carryover of management effects
+Climate Projections: Integration with future climate scenarios
+Weather Extremes: Handling of drought, floods, heat waves
+Management-Climate Interactions: How climate affects control effectiveness
+Cost-Benefit Optimization: Automated management strategy suggestions
+Batch Processing: Analyze multiple scenarios simultaneously
+Enhanced Uncertainty: Bootstrap or Bayesian approaches
+Mobile Optimization: Improved touch interface for tablets/phones
+Data Export: Enhanced download options (GeoJSON, KML, etc.)
+Research Needs
+Enzootic Plague Dynamics: Better small-scale plague modeling
+Recovery Patterns: Where colonies re-establish after die-offs
+Management Efficacy Studies: Real-world effectiveness data
+Economic Validation: Field studies of actual forage impacts
+Climate Change Impacts: How shifting climates affect system
+Multi-Species Considerations: Incorporate other grassland species and interactions
+Resources and References
+Key Publications
+Barrile et al., 2023: “A big data–model integration approach for predicting epizootics and population recovery in a keystone species” - Ecol. Appl. 33, e2827
+Augustine & Derner, 2021: “Long-Term Effects of Black-Tailed Prairie Dogs on Livestock Grazing Distribution and Mass Gain” - Journal of Wildlife Management, 85(7):1332-1343
+Augustine et al., 2024: “Does Drought Intensify the Effects of Black-Tailed Prairie Dogs on Livestock Production and Net Revenue in Semiarid Rangelands?” - Rangeland Ecology and Management
+Buehler et al., 2025: “Exploring the Efficacy of Prairie Dog Boundary Management and its Application Toward Density Control” - Rangeland Ecology and Management, 99(2):66-76
+Crow et al., 2022: “Evaluating Prairie Dog-Cattle Competition from the Perspective of a Ranching Enterprise in the Western Great Plains: Economic Analysis of Potential Effects on Long-Term Profitability” - Rangeland Ecology and Management, 85: 56-65
+Data Resources
+Soils and Production Data
+USDA WebSoil Survey
+https://websoilsurvey.nrcs.usda.gov/app/WebSoilSurvey.aspx
+Provides: Soils, Range Production, Yield, Land Classifications
+
+Rangeland Analysis
+Rangeland Analysis Platform and Production Explorer
+https://rangelands.app/
+Provides: Rangeland production data and analysis tools
+
+Application Access
+PDOG MAPR Web Application
+https://moped.shinyapps.io/PDOGMAPR/
+
+Video Tutorial
+https://youtu.be/jnRZ6dRA6mg
+Recommended viewing before first use
+
+Support and Feedback
+Users can provide feedback through: - Direct contact with research team - Bug reports and feature requests on GitHub
+
+Appendix: Complete Application Code
+The full application code is organized into six main sections:
+
+Libraries and Setup
+Data Loading and Validation
+Helper Functions
+User Interface Definition
+Server Logic
+Application Launch
+For the complete, runnable code, see the source file: prairie_dog_app_glm_stablev9_7.R
+
+Acknowledgments
+This tool was developed through collaborative efforts of: - Conservation partners - Grassland managers - Research scientists - Statistical modelers - Software developers
+
+The tool is intended as the first step in an iterative process informed by ongoing feedback and real-world application.
+
+Document generated: 2025-12-22
+Application Version: 9.7
+Documentation Version: 2.0
