@@ -47,6 +47,7 @@ source("prairie_dog_app_glm_stablev9_7.R")
 
 ## Documentation
 
+- **[Web Documentation](https://bortedwards.github.io/PDOG-MAPR-a-prairie-dog-decision-tool/)** - Web-based documentation
 - **[Full Documentation](docs/prairie_dog_app_documentation_v9_7.Rmd)** - Comprehensive R Markdown documentation
 - **[Video Tutorial](https://youtu.be/jnRZ6dRA6mg)** - Step-by-step walkthrough
 
