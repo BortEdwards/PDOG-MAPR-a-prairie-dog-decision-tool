@@ -1,4 +1,14 @@
-# PDOG MAPR - Prairie Dog Management and Planning Resource
+<table>
+  <tr>
+    <td width="140" valign="middle">
+      <img src="images/PDOGMAPRlogo.png" alt="PDOG MAPR logo" width="120">
+    </td>
+    <td valign="middle">
+      <h1>PDOG MAPR – Prairie Dog Management and Planning Resource</h1>
+    </td>
+  </tr>
+</table>
+
 
 [![Version](https://img.shields.io/badge/version-9.7-blue.svg)](https://github.com/yourusername/pdog-mapr)
 [![License](https://img.shields.io/badge/license-MIT-green.svg)](LICENSE)
