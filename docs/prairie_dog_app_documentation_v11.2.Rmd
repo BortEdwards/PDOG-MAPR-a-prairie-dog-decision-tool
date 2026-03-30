@@ -1,5 +1,5 @@
 ---
-title: "Prairie Dog Decision Tool v9.7"
+title: "Prairie Dog Decision Tool v11.2"
 subtitle: "PDOG MAPR - Prairie Dog Management and Planning Resource"
 author: "Research Team:
     Lead - Dr Ana Davidson (CNHP); 
@@ -38,6 +38,9 @@ PDOG MAPR is a decision support tool to help inform management of prairie dog ec
 - **Summary plots and statistics**
 - **Interactive map interface** with polygon drawing capability
 - **Plague prediction** and colony growth forecasting
+- **Study Region Map** for spatial orientation within the tool's geographic scope
+- **Dummy data** available for download to explore the app before uploading your own data
+- **Treatment efficacy modelling** to simulate sub-100% prairie dog control effectiveness
 
 ## Application Architecture
 
@@ -374,6 +377,47 @@ calculate_uncertainty_delta <- function(model, pred_data, predictions_link) {
 }
 ```
 
+## Treatment Efficacy
+
+### Apply Treatment Efficacy
+
+Modifies the binary poison treatment raster to represent sub-100% treatment
+effectiveness. Only applies to prairie dog lethal control areas — plague mitigation
+(insecticide) areas are unaffected.
+
+**Arguments:**
+
+- `treatment_raster`: raster with 1 = treated pixel, 0 = untreated pixel
+- `efficacy_pct`: numeric 1–99, the percentage of the treatment area that is
+  effectively treated
+- `mode`: one of `"scatter"` or `"cluster"` — `"full"` and `"uniform"` are handled
+  separately at the point of use
+
+**Modes:**
+
+- **scatter**: A random `(1 - efficacy_pct/100)` proportion of treated pixels are set
+  to 0, distributed randomly across the treatment area. Stochastic — each run produces
+  a different spatial outcome.
+- **cluster**: The same proportion of pixels are set to 0, but spatially clustered
+  using a seed-and-grow approach, better representing colony-level treatment failure.
+  Also stochastic between runs.
+- **uniform** (applied at model step, not here): Colonization and persistence
+  probabilities within the treatment area are multiplied by `(1 - efficacy_pct/100)`
+  rather than zeroed. At default model thresholds this mode may produce results similar
+  to full efficacy, which may itself reflect the strong recolonization capacity of
+  prairie dogs. Downward adjustment of the recolonization threshold may produce greater
+  differences.
+
+```{r treatment-efficacy}
+apply_treatment_efficacy <- function(treatment_raster, efficacy_pct, mode) {
+  # treatment_raster: raster with 1 = treated, 0 = untreated
+  # efficacy_pct: numeric 1-99
+  # mode: "scatter" or "cluster"
+  # Returns: modified raster with (1 - efficacy_pct/100) proportion of
+  #          treated pixels set to 0
+}
+```
+
 ## Economic Calculator
 
 ### Calculate Economic Scenarios
@@ -387,55 +431,29 @@ Calculates economic impacts under different forage assumptions.
 - **Scenario C**: Prairie dog colonies yield 50% forage
 - **Scenario D**: Prairie dog colonies yield 0% forage
 
+**Outputs per scenario:**
+
+- Change in forage on controlled land (lbs and lbs/acre)
+- Net change in forage across the total landscape (lbs and lbs/acre)
+- Percentage of potential forage loss prevented through prairie dog control
+- Prairie dog density (per acre, user-adjustable; default 42)
+- Total expenditure on prairie dog control
+
 ```{r economic-calculator}
-calculate_economic_scenario <- function(acres_poisoned, acres_pdogs_after, 
-                                       ppa_value, cost_per_acre, scenario_type) {
+calculate_economic_scenario <- function(acres_poisoned, acres_pdogs_before,
+                                       acres_pdogs_after, colony_under_treatment,
+                                       ppa_value, cost_per_acre, scenario_type,
+                                       pdog_density = 42) {
   # Fixed parameters (under the hood)
-  PDOG_DENSITY_PER_HA <- 42
-  EFFICACY_POISONING <- 100  # percent
+  PDOG_DENSITY_PER_HA <- pdog_density
   COWS_PER_PDOG <- 1/335     # prairie dogs per cow equivalent
   POUNDS_PER_COW_PER_DAY <- 0.025 * 1000  # 25 lbs
   DAYS_PER_YEAR <- 365
-  
-  # Calculate based on scenario type
-  if (scenario_type == "consumption") {
-    # Scenario A: Based on pdog consumption estimates
-    
-    # Forage SAVED (from poisoning)
-    total_pdogs_poisoned <- PDOG_DENSITY_PER_HA * acres_poisoned
-    cows_equivalent_saved <- total_pdogs_poisoned * COWS_PER_PDOG
-    pounds_per_cow_per_year <- POUNDS_PER_COW_PER_DAY * DAYS_PER_YEAR
-    forage_saved <- pounds_per_cow_per_year * cows_equivalent_saved
-    
-    # Forage LOST (from remaining pdogs)
-    total_pdogs_remaining <- PDOG_DENSITY_PER_HA * acres_pdogs_after
-    cows_equivalent_lost <- total_pdogs_remaining * COWS_PER_PDOG
-    forage_lost <- pounds_per_cow_per_year * cows_equivalent_lost
-    
-  } else if (scenario_type == "no_forage") {
-    # Scenario B: Pdog colonies have 0% forage value
-    forage_saved <- acres_poisoned * ppa_value
-    forage_lost <- acres_pdogs_after * ppa_value
-    
-  } else if (scenario_type == "half_forage") {
-    # Scenario C: Pdog colonies have 50% forage value
-    forage_saved <- acres_poisoned * ppa_value * 0.5
-    forage_lost <- acres_pdogs_after * ppa_value * 0.5
-    
-  } else if (scenario_type == "no_increase") {
-    # Scenario D: No increase in forage
-    forage_saved <- 0
-    forage_lost <- 0
-  }
-  
-  # Calculate total cost
-  total_cost <- cost_per_acre * acres_poisoned
-  
-  return(list(
-    forage_saved = forage_saved,
-    forage_lost = forage_lost,
-    total_cost = total_cost
-  ))
+
+  # Returns list including:
+  #   forage_change_controlled, forage_change_controlled_per_acre,
+  #   forage_change_total, forage_change_total_per_acre,
+  #   percentage_saved, total_cost
 }
 ```
 
@@ -443,10 +461,11 @@ calculate_economic_scenario <- function(acres_poisoned, acres_pdogs_after,
 
 # User Interface
 
-The UI is built using `navbarPage` with two main tabs:
+The UI is built using `navbarPage` with three main tabs:
 
-1. **Overview Tab**: Documentation and instructions
-2. **Predict Tab**: Interactive prediction interface
+1. **Study Region Tab**: Map orienting users to the tool's geographic scope
+2. **Overview Tab**: Documentation and instructions
+3. **Predict Tab**: Interactive prediction interface
 
 ## UI Structure
 
@@ -486,12 +505,15 @@ The sidebar contains:
 4. **Step 2**: Prairie dog control areas upload
 5. **Step 3**: Plague treatment areas upload
 6. **Step 3b**: Draw management areas
-7. **Step 4**: Prior year colony upload
-8. **Step 5**: Study region selection
-9. **Climate parameters** (temperature, precipitation)
-10. **Prediction thresholds** (growth and plague)
-11. **Run Models button**
-12. **Download button**
+7. **Step 3c**: Prairie dog treatment efficacy (optional)
+8. **Step 4**: Prior year colony upload
+9. **Step 5**: Study region selection
+10. **Climate parameters** (temperature, precipitation)
+11. **Prediction thresholds** (growth and plague)
+12. **Run Models button**
+13. **Download button**
+
+A **dummy data download button** is available at the top of the sidebar, providing sample colony and management shapefiles for East Pawnee and Thunder Basin sites to allow users to explore the app before uploading their own data.
 
 ### Main Panel
 
@@ -534,10 +556,18 @@ values <- reactiveValues(
   poison_upload_year = NULL,
   insecticide_upload_year = NULL,
   economic_results = list(
-    A = list(forage_lost = 0, total_cost = 0),
-    B = list(forage_lost = 0, total_cost = 0),
-    C = list(forage_lost = 0, total_cost = 0),
-    D = list(forage_lost = 0, total_cost = 0)
+    A = list(forage_change_controlled = 0, forage_change_controlled_per_acre = 0,
+             forage_change_total = 0, forage_change_total_per_acre = 0,
+             percentage_saved = 0, total_cost = 0),
+    B = list(forage_change_controlled = 0, forage_change_controlled_per_acre = 0,
+             forage_change_total = 0, forage_change_total_per_acre = 0,
+             percentage_saved = 0, total_cost = 0),
+    C = list(forage_change_controlled = 0, forage_change_controlled_per_acre = 0,
+             forage_change_total = 0, forage_change_total_per_acre = 0,
+             percentage_saved = 0, total_cost = 0),
+    D = list(forage_change_controlled = 0, forage_change_controlled_per_acre = 0,
+             forage_change_total = 0, forage_change_total_per_acre = 0,
+             percentage_saved = 0, total_cost = 0)
   ),
   # Multi-year iteration state
   current_year = 1,
@@ -772,6 +802,7 @@ output$ShapeExport <- downloadHandler(
 2. **Management Input**
    - Uploads or draws prairie dog control areas
    - Uploads or draws plague treatment areas
+   - Optionally selects a treatment efficacy mode and percentage (Step 3c)
 
 3. **Historical Data**
    - Uploads prior year colony shapefile
@@ -860,7 +891,7 @@ Key raster transformations:
 
 ## Threshold Application
 
-### Growth Threshold (Default: 0.90)
+### Growth Threshold (Default: 0.95)
 
 - Predicted growth probability must exceed this value
 - Higher values = more conservative growth predictions
@@ -1016,7 +1047,7 @@ Provides notifications for:
 
 ## Management Assumptions
 
-1. **100% Efficacy**: Control measures assumed completely effective
+1. **Configurable Treatment Efficacy**: Prairie dog lethal control can be modelled at 100% effectiveness (default) or at a user-specified sub-100% efficacy using one of three spatial representations (see Step 3c). Plague mitigation (insecticide) remains assumed fully effective.
 2. **Annual Reset**: Management effects don't persist between years (configurable)
 3. **Spatial Precision**: Cannot predict exact recovery locations after plague
 
@@ -1038,16 +1069,15 @@ Provides notifications for:
 
 ## Features
 
-1. **Variable Management Efficacy**: Incorporate realistic success rates
-2. **Multi-Year Persistence**: Configurable carryover of management effects
-3. **Climate Projections**: Integration with future climate scenarios
-4. **Weather Extremes**: Handling of drought, floods, heat waves
-5. **Management-Climate Interactions**: How climate affects control effectiveness
-6. **Cost-Benefit Optimization**: Automated management strategy suggestions
-7. **Batch Processing**: Analyze multiple scenarios simultaneously
-8. **Enhanced Uncertainty**: Bootstrap or Bayesian approaches
-9. **Mobile Optimization**: Improved touch interface for tablets/phones
-10. **Data Export**: Enhanced download options (GeoJSON, KML, etc.)
+1. **Multi-Year Persistence**: Configurable carryover of management effects
+2. **Climate Projections**: Integration with future climate scenarios
+3. **Weather Extremes**: Handling of drought, floods, heat waves
+4. **Management-Climate Interactions**: How climate affects control effectiveness
+5. **Cost-Benefit Optimization**: Automated management strategy suggestions
+6. **Batch Processing**: Analyze multiple scenarios simultaneously
+7. **Enhanced Uncertainty**: Bootstrap or Bayesian approaches
+8. **Mobile Optimization**: Improved touch interface for tablets/phones
+9. **Data Export**: Enhanced download options (GeoJSON, KML, etc.)
 
 ## Research Needs
 
@@ -1110,7 +1140,7 @@ The full application code is organized into six main sections:
 5. **Server Logic**
 6. **Application Launch**
 
-For the complete, runnable code, see the source file: `prairie_dog_app_glm_stablev9_7.R`
+For the complete, runnable code, see the source file: `prairie_dog_app_glm_stablev11_1.R`
 
 ---
 
